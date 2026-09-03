@@ -6,7 +6,6 @@ package sshnginx
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -215,7 +214,7 @@ func (d *Deployer) Verify(ctx context.Context, b *deploy.Bundle) error {
 
 	var pending []string
 	for _, domain := range d.params.VerifyDomains {
-		fp, err := probeFingerprint(ctx, domain, port)
+		fp, err := deploy.ProbeFingerprint(ctx, domain, port)
 		if err != nil {
 			pending = append(pending, fmt.Sprintf("%s: %v", domain, err))
 			continue
@@ -232,26 +231,3 @@ func (d *Deployer) Verify(ctx context.Context, b *deploy.Bundle) error {
 
 // RetryWindow：nginx reload 是即时的，窗口比 CDN 短得多。
 func (d *Deployer) RetryWindow() deploy.RetryWindow { return deploy.DefaultWindow }
-
-func probeFingerprint(ctx context.Context, host string, port int) (string, error) {
-	dialer := &tls.Dialer{Config: &tls.Config{
-		ServerName: host,
-		MinVersion: tls.VersionTLS12,
-		// 只取指纹，链是否可信由巡检单独检查。
-		InsecureSkipVerify: true,
-	}}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-
-	state := conn.(*tls.Conn).ConnectionState()
-	if len(state.PeerCertificates) == 0 {
-		return "", errors.New("对端没有返回证书")
-	}
-	return deploy.Fingerprint(state.PeerCertificates[0]), nil
-}

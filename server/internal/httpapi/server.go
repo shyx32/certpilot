@@ -45,6 +45,13 @@ func New(st *store.Store, hub *events.Hub, challenges *ChallengeStore, sessions 
 
 	r.Post("/api/v1/auth/login", a.login)
 
+	// 指标端点需要登录：它会暴露全部域名，属于内部信息。
+	// 让 Prometheus 用一个只读账号抓取即可。
+	r.Group(func(r chi.Router) {
+		r.Use(a.requireAuth)
+		r.Get("/metrics", a.metrics)
+	})
+
 	// ---- 需要登录 ----
 
 	r.Group(func(r chi.Router) {
@@ -111,6 +118,26 @@ func New(st *store.Store, hub *events.Hub, challenges *ChallengeStore, sessions 
 				r.Post("/{id}/dry-run", a.dryRunService)
 				// 自定义命令是特权操作：它决定了远端要执行什么。
 				r.With(a.requireAdmin).Put("/{id}/commands", a.updateServiceCommands)
+			})
+
+			r.Route("/health-checks", func(r chi.Router) {
+				r.Get("/", a.listHealth)
+				r.Post("/scan", a.runHealthScan)
+				r.Post("/probe", a.probeOnce)
+			})
+
+			r.Route("/monitors", func(r chi.Router) {
+				r.Get("/", a.listMonitorDomains)
+				r.Post("/", a.createMonitorDomain)
+				r.Delete("/{id}", a.deleteMonitorDomain)
+			})
+
+			r.Route("/notify-channels", func(r chi.Router) {
+				r.Get("/", a.listNotifyChannels)
+				r.Post("/{id}/test", a.testNotifyChannel)
+				// 渠道配置里含 Webhook token，写操作限管理员。
+				r.With(a.requireAdmin).Post("/", a.createNotifyChannel)
+				r.With(a.requireAdmin).Delete("/{id}", a.deleteNotifyChannel)
 			})
 
 			r.Route("/jobs", func(r chi.Router) {

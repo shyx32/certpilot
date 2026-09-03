@@ -228,3 +228,67 @@ export interface DryRunResult {
   command?: string[];
   output: string;
 }
+
+export interface Finding {
+  code: string;
+  text: string;
+  severity: "info" | "warn" | "danger";
+}
+
+export interface HealthCheck {
+  id: number;
+  cert_config_id?: number;
+  domain: string;
+  port: number;
+  observed_fp?: string;
+  subject?: string;
+  issuer?: string;
+  not_after?: string;
+  days_left?: number;
+  chain_ok?: boolean;
+  chain_len?: number;
+  name_match?: boolean;
+  fp_match?: boolean;
+  tls_version?: string;
+  severity: "" | "info" | "warn" | "danger";
+  findings: Finding[];
+  probe_error?: string;
+  checked_at: string;
+}
+
+export interface MonitorDomain {
+  id: number;
+  domain: string;
+  port: number;
+  sni?: string;
+  note?: string;
+  enabled: boolean;
+}
+
+export interface NotifyChannel {
+  id: number;
+  name: string;
+  kind: string;
+  events: string[];
+  enabled: boolean;
+}
+
+export interface NotifyChannelsResponse {
+  channels: NotifyChannel[];
+  kinds: string[];
+  events: { value: string; label: string }[];
+}
+
+export interface ProbeResult {
+  fingerprint: string;
+  subject: string;
+  issuer: string;
+  not_after: string;
+  days_left: number;
+  sans: string[];
+  chain_len: number;
+  chain_ok: boolean;
+  name_match: boolean;
+  tls_version: string;
+  issues: Finding[];
+}

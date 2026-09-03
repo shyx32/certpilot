@@ -269,3 +269,36 @@ func (s *Store) PruneCertificates(ctx context.Context, configID int64, keep int)
 			ORDER BY not_after DESC LIMIT $2)`, configID, keep)
 	return err
 }
+
+// IssuanceCounts 统计滚动窗口内的签发量，用于本地配额自保护。
+//
+// 返回该注册域下的总签发数，以及与给定域名组合完全相同的签发数。
+func (s *Store) IssuanceCounts(ctx context.Context, registeredDomain string,
+	domains []string, windowDays int) (perDomain, duplicates int, err error) {
+
+	// 注册域匹配：域名以该注册域结尾（或就是它）。
+	err = s.pool.QueryRow(ctx, `
+		SELECT count(DISTINCT c.id)
+		FROM certificate c
+		JOIN cert_config cc ON cc.id = c.cert_config_id
+		WHERE c.created_at >= now() - make_interval(days => $2)
+		  AND EXISTS (
+		      SELECT 1 FROM unnest(cc.domains) AS d(name)
+		      WHERE lower(ltrim(d.name, '*.')) = $1
+		         OR lower(d.name) LIKE '%.' || $1
+		  )`, registeredDomain, windowDays).Scan(&perDomain)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// 完全相同的域名组合：排序后比较，避免顺序不同被当成不同组合。
+	err = s.pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM certificate c
+		JOIN cert_config cc ON cc.id = c.cert_config_id
+		WHERE c.created_at >= now() - make_interval(days => $2)
+		  AND (SELECT array_agg(x ORDER BY x) FROM unnest(cc.domains) AS x)
+		    = (SELECT array_agg(y ORDER BY y) FROM unnest($1::text[]) AS y)`,
+		domains, windowDays).Scan(&duplicates)
+	return perDomain, duplicates, err
+}

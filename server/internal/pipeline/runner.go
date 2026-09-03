@@ -14,23 +14,35 @@ import (
 	"github.com/certpilot/server/internal/dnsx"
 	"github.com/certpilot/server/internal/domain"
 	"github.com/certpilot/server/internal/events"
+	"github.com/certpilot/server/internal/notify"
 	"github.com/certpilot/server/internal/provider/deploy"
 	"github.com/certpilot/server/internal/provider/deploy/sshnginx"
 	dnsprov "github.com/certpilot/server/internal/provider/dns"
 	"github.com/certpilot/server/internal/store"
 )
 
+// ErrRateLimited 表示本地配额自保护拦下了本次签发。
+//
+// 它是暂时的：滚动窗口过去后就能继续，因此按退避重试处理，
+// 而不是像域名未托管那样直接转人工。
+var ErrRateLimited = errors.New("已触及本地签发配额")
+
 // Runner 执行一个签发/续期任务。
 type Runner struct {
 	store      *store.Store
 	hub        *events.Hub
 	challenges acme.HTTPChallenge
+	notifier   *notify.Dispatcher
 	// KeepVersions 是每个配置保留的历史证书版本数。
 	KeepVersions int
+	// Limits 是本地的 CA 配额自保护。
+	Limits domain.RateLimits
 }
 
-func New(s *store.Store, hub *events.Hub, challenges acme.HTTPChallenge) *Runner {
-	return &Runner{store: s, hub: hub, challenges: challenges, KeepVersions: 5}
+func New(s *store.Store, hub *events.Hub, challenges acme.HTTPChallenge,
+	notifier *notify.Dispatcher) *Runner {
+	return &Runner{store: s, hub: hub, challenges: challenges,
+		notifier: notifier, KeepVersions: 5, Limits: domain.DefaultRateLimits()}
 }
 
 // Run 按状态机推进一个任务，并把每一步写进日志与事件流。
@@ -49,7 +61,13 @@ func (r *Runner) Run(ctx context.Context, job *store.Job) error {
 	// ---- PREFLIGHT ----
 	zones, err := r.preflight(ctx, job, cfg)
 	if err != nil {
-		return r.fail(ctx, job, err, domain.RetryNever)
+		// 配额超限是暂时的：窗口过去就能签，永久放弃会让证书白白过期。
+		// 其余前置失败（域名未托管、凭据无效）重试也不会变。
+		class := domain.RetryNever
+		if errors.Is(err, ErrRateLimited) {
+			class = domain.RetryBackoff
+		}
+		return r.fail(ctx, job, err, class)
 	}
 
 	// ---- ORDERING → FINALIZING ----
@@ -144,6 +162,17 @@ func (r *Runner) Run(ctx context.Context, job *store.Job) error {
 
 	_ = r.store.PruneCertificates(ctx, cfg.ID, r.KeepVersions)
 	r.stage(ctx, job, domain.StageVerified, "全部目标已确认线上生效")
+
+	r.notify(ctx, &notify.Message{
+		Event: notify.EventIssued,
+		Level: notify.LevelInfo,
+		Title: fmt.Sprintf("%s 已签发并生效", cfg.Name),
+		Lines: []string{
+			"域名：" + strings.Join(cfg.Domains, ", "),
+			"有效期至：" + leaf.NotAfter.Format(time.DateOnly),
+			"颁发者：" + leaf.Issuer.CommonName,
+		},
+	})
 	return r.store.FinishJob(ctx, job.ID, domain.StageVerified)
 }
 
@@ -169,6 +198,10 @@ func (r *Runner) preflight(ctx context.Context, job *store.Job, cfg *store.CertC
 		return nil, nil
 	}
 
+	if err := r.checkRateLimit(ctx, job, cfg); err != nil {
+		return nil, err
+	}
+
 	zones, err := r.store.AllZones(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("读取 zone 清单失败: %w", err)
@@ -182,6 +215,38 @@ func (r *Runner) preflight(ctx context.Context, job *store.Job, cfg *store.CertC
 			fmt.Sprintf("%s → zone %s，记录 %s", m.Domain, m.Zone.Name, m.RecordName))
 	}
 	return zones, nil
+}
+
+// checkRateLimit 在向 CA 发出任何请求之前先看本地计数。
+//
+// CA 的配额一旦撞上，整个注册域会被锁一整周——那时再想签任何一张
+// 新证书都不行。主动停下来告警，代价远小于撞墙。
+func (r *Runner) checkRateLimit(ctx context.Context, job *store.Job, cfg *store.CertConfig) error {
+	if len(cfg.Domains) == 0 {
+		return nil
+	}
+	rd := domain.RegisteredDomain(cfg.Domains[0])
+	issued, dups, err := r.store.IssuanceCounts(ctx, rd, cfg.Domains, r.Limits.WindowDays)
+	if err != nil {
+		// 计数失败不阻断签发：宁可多签一张，也不要因为统计出错而漏签。
+		slog.Warn("配额计数失败，跳过本地限流检查", "err", err)
+		return nil
+	}
+	v := r.Limits.Check(rd, issued, dups)
+	if v.Allowed {
+		r.log(ctx, job, domain.StagePreflight, "info",
+			fmt.Sprintf("配额检查通过：注册域 %s 近 %d 天已签发 %d 张",
+				rd, r.Limits.WindowDays, issued))
+		return nil
+	}
+
+	r.notify(ctx, &notify.Message{
+		Event: notify.EventIssueFailed,
+		Level: notify.LevelWarn,
+		Title: "已触及本地签发配额，暂停签发",
+		Lines: []string{v.Reason, "配置：" + cfg.Name},
+	})
+	return fmt.Errorf("%w：%s", ErrRateLimited, v.Reason)
 }
 
 // deployAll 把证书推送到全部绑定目标。
@@ -439,7 +504,35 @@ func (r *Runner) fail(ctx context.Context, job *store.Job, cause error, class do
 		Type: "job_state", JobID: job.ID, Stage: string(domain.StageFailed),
 		Message: cause.Error(),
 	})
+
+	// 只在真正放弃时通知：还要退避重试的失败发通知只会制造噪音。
+	if class == domain.RetryNever || job.Attempt >= job.MaxAttempts {
+		title := "证书任务失败"
+		if job.RefID != nil {
+			if cfg, err := r.store.GetCertConfig(ctx, *job.RefID); err == nil {
+				title = cfg.Name + " 签发失败"
+			}
+		}
+		r.notify(ctx, &notify.Message{
+			Event: notify.EventIssueFailed,
+			Level: notify.LevelDanger,
+			Title: title,
+			Lines: []string{
+				cause.Error(),
+				fmt.Sprintf("已尝试 %d 次，需要人工处理。", job.Attempt),
+			},
+			Footer: fmt.Sprintf("任务 #%d", job.ID),
+		})
+	}
 	return r.store.FailJob(ctx, job, cause.Error(), class)
+}
+
+// notify 发送通知。通知失败不影响主流程——证书已经签好了，
+// 发不出群消息不该让任务变成失败。
+func (r *Runner) notify(ctx context.Context, m *notify.Message) {
+	if r.notifier != nil {
+		r.notifier.Send(ctx, m)
+	}
 }
 
 func deref(s *string) string {

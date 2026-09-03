@@ -11,6 +11,8 @@ import { CertificateDetail } from "@/pages/CertificateDetail";
 import { Credentials } from "@/pages/Credentials";
 import { Targets } from "@/pages/Targets";
 import { Servers } from "@/pages/Servers";
+import { Health } from "@/pages/Health";
+import { Notifications } from "@/pages/Notifications";
 import { JobDetail, Jobs } from "@/pages/Jobs";
 import { Settings } from "@/pages/Settings";
 
@@ -83,6 +85,8 @@ function Gate() {
             <Route path="/credentials" element={<Credentials />} />
             <Route path="/servers" element={<Servers />} />
             <Route path="/targets" element={<Targets />} />
+            <Route path="/health" element={<Health />} />
+            <Route path="/notifications" element={<Notifications />} />
             <Route path="/jobs" element={<Jobs />} />
             <Route path="/jobs/:id" element={<JobDetail />} />
             <Route path="/settings" element={<Settings />} />

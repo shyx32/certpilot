@@ -14,14 +14,16 @@ import (
 	"github.com/certpilot/server/internal/acme"
 	"github.com/certpilot/server/internal/domain"
 	"github.com/certpilot/server/internal/events"
+	"github.com/certpilot/server/internal/notify"
 	"github.com/certpilot/server/internal/pipeline"
 	"github.com/certpilot/server/internal/store"
 )
 
 type Scheduler struct {
-	store  *store.Store
-	hub    *events.Hub
-	runner *pipeline.Runner
+	store    *store.Store
+	hub      *events.Hub
+	runner   *pipeline.Runner
+	notifier *notify.Dispatcher
 
 	// ScanInterval 是到期扫描的周期。
 	ScanInterval time.Duration
@@ -34,17 +36,37 @@ type Scheduler struct {
 	Concurrency int
 	// StaleAfter 超过此时长仍处于 running 的任务视为进程崩溃遗留。
 	StaleAfter time.Duration
+
+	// ---- 巡检 ----
+
+	// HealthHour 是每日巡检的触发时刻（本地时间 0-23）。
+	HealthHour int
+	// ProbeConcurrency 是同时拨测的域名数。
+	ProbeConcurrency int
+	// CheckRevocation 打开后额外查询 OCSP；默认关闭，因为它慢且不稳定。
+	CheckRevocation bool
+
+	// ---- 保留策略 ----
+
+	KeepHealthDays int
+	KeepJobDays    int
 }
 
 func New(s *store.Store, hub *events.Hub, challenges acme.HTTPChallenge) *Scheduler {
+	notifier := notify.NewDispatcher(s)
 	return &Scheduler{
-		store:        s,
-		hub:          hub,
-		runner:       pipeline.New(s, hub, challenges),
-		ScanInterval: time.Hour,
-		PollInterval: 5 * time.Second,
-		Concurrency:  3,
-		StaleAfter:   30 * time.Minute,
+		store:            s,
+		hub:              hub,
+		notifier:         notifier,
+		runner:           pipeline.New(s, hub, challenges, notifier),
+		ScanInterval:     time.Hour,
+		PollInterval:     5 * time.Second,
+		Concurrency:      3,
+		StaleAfter:       30 * time.Minute,
+		HealthHour:       4,
+		ProbeConcurrency: 10,
+		KeepHealthDays:   90,
+		KeepJobDays:      180,
 	}
 }
 
@@ -82,7 +104,33 @@ func (s *Scheduler) scanLoop(ctx context.Context) {
 	}
 }
 
+// maybeQueueHealthScan 每天在设定时刻投递一次巡检任务。
+//
+// 用「当天是否已跑过」判断而不是固定间隔，这样进程重启不会漏掉当天的巡检，
+// 也不会因为频繁重启而重复跑。
+func (s *Scheduler) maybeQueueHealthScan(ctx context.Context) {
+	now := time.Now()
+	if now.Hour() != s.HealthHour {
+		return
+	}
+	ran, err := s.store.HealthScanRanToday(ctx)
+	if err != nil {
+		slog.Error("检查今日巡检状态失败", "err", err)
+		return
+	}
+	if ran {
+		return
+	}
+	if id, err := s.store.EnqueueJob(ctx, "health_scan", nil, nil); err != nil {
+		slog.Error("投递巡检任务失败", "err", err)
+	} else {
+		slog.Info("已投递每日巡检", "job", id)
+	}
+}
+
 func (s *Scheduler) scanOnce(ctx context.Context) {
+	s.maybeQueueHealthScan(ctx)
+
 	due, err := s.store.DueForRenewal(ctx)
 	if err != nil {
 		slog.Error("扫描待续期证书失败", "err", err)
@@ -162,6 +210,8 @@ func (s *Scheduler) execute(ctx context.Context, job *store.Job) {
 		err = s.runner.Run(ctx, job)
 	case "sync_zones":
 		err = s.syncZones(ctx, job)
+	case "health_scan":
+		err = s.runHealthScan(ctx, job)
 	default:
 		err = s.store.FailJob(ctx, job,
 			"未知任务类型 "+job.Kind, domain.RetryNever)

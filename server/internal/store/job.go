@@ -217,3 +217,15 @@ func (s *Store) PruneJobs(ctx context.Context, keepDays int) error {
 		  AND finished_at < now() - make_interval(days => $1)`, keepDays)
 	return err
 }
+
+// HealthScanRanToday 报告今天是否已经跑过巡检。
+//
+// 用它而不是固定间隔来判断，进程重启既不会漏掉当天的巡检，
+// 也不会因频繁重启而重复跑。
+func (s *Store) HealthScanRanToday(ctx context.Context) (bool, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM job
+		WHERE kind = 'health_scan' AND created_at >= date_trunc('day', now())`).Scan(&n)
+	return n > 0, err
+}

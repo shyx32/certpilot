@@ -1,6 +1,6 @@
 import { NavLink, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard, ShieldCheck, Server, KeyRound, HardDrive,
+  LayoutDashboard, ShieldCheck, Server, KeyRound, HardDrive, Activity, Bell,
   ScrollText, Settings2, Moon, Sun, LogOut, ChevronRight,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -27,9 +27,16 @@ const groups = [
     ],
   },
   {
+    label: "运行",
+    items: [
+      { to: "/health", icon: Activity, label: "巡检看板" },
+      { to: "/jobs", icon: ScrollText, label: "任务与日志" },
+    ],
+  },
+  {
     label: "系统",
     items: [
-      { to: "/jobs", icon: ScrollText, label: "任务与日志" },
+      { to: "/notifications", icon: Bell, label: "通知渠道" },
       { to: "/settings", icon: Settings2, label: "CA 账号" },
     ],
   },
@@ -42,6 +49,8 @@ const crumbs: Record<string, string> = {
   "/servers": "服务器",
   "/targets": "部署目标",
   "/credentials": "凭据",
+  "/health": "巡检看板",
+  "/notifications": "通知渠道",
   "/jobs": "任务与日志",
   "/settings": "CA 账号",
 };

@@ -7,13 +7,11 @@ package aliyuncdn
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
 	cas "github.com/aliyun/alibaba-cloud-sdk-go/services/cas"
@@ -163,7 +161,7 @@ func (d *Deployer) bind(ctx context.Context, domain string, certID int64, b *dep
 func (d *Deployer) Verify(ctx context.Context, b *deploy.Bundle) error {
 	var pending []string
 	for _, domain := range d.params.Domains {
-		fp, err := probeFingerprint(ctx, domain)
+		fp, err := deploy.ProbeFingerprint(ctx, domain, 443)
 		if err != nil {
 			pending = append(pending, fmt.Sprintf("%s: %v", domain, err))
 			continue
@@ -186,28 +184,4 @@ func short(fp string) string {
 		return fp[:8]
 	}
 	return fp
-}
-
-// probeFingerprint 与目标建立 TLS 连接并取出叶证书指纹。
-func probeFingerprint(ctx context.Context, host string) (string, error) {
-	dialer := &tls.Dialer{Config: &tls.Config{
-		ServerName: host,
-		MinVersion: tls.VersionTLS12,
-		// 只取指纹，不做信任校验——链是否可信由巡检单独检查。
-		InsecureSkipVerify: true,
-	}}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	conn, err := dialer.DialContext(ctx, "tcp", host+":443")
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-
-	state := conn.(*tls.Conn).ConnectionState()
-	if len(state.PeerCertificates) == 0 {
-		return "", errors.New("对端没有返回证书")
-	}
-	return deploy.Fingerprint(state.PeerCertificates[0]), nil
 }

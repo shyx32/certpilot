@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/certpilot/server/internal/acme"
@@ -68,5 +69,16 @@ func TestClassifyRateLimitedStillRetries(t *testing.T) {
 	}
 	if got := classify(err); got != domain.RetryBackoff {
 		t.Fatalf("速率限制应继续重试，实得 %v", got)
+	}
+}
+
+// 配额超限是暂时的：窗口过去就能签，不能永久放弃。
+func TestRateLimitedIsRetryable(t *testing.T) {
+	err := fmt.Errorf("%w：注册域 example.com 近 7 天已签发 40 张", ErrRateLimited)
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatal("哨兵错误未能被识别")
+	}
+	if got := classify(err); got != domain.RetryBackoff {
+		t.Errorf("配额超限应退避重试，实得 %v", got)
 	}
 }
