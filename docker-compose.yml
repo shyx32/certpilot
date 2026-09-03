@@ -1,0 +1,57 @@
+services:
+  web:                            # 前端页面 + 反向代理，唯一对外
+    build: ./web
+    image: certpilot/web:${TAG:-dev}
+    ports:
+      - "${HTTP_PORT:-8088}:80"
+    environment:
+      API_UPSTREAM: http://api:8080
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  migrate:                        # 一次性容器，跑完即退出
+    build: ./server
+    image: certpilot/server:${TAG:-dev}
+    command: ["migrate"]
+    environment:
+      CP_DB_DSN: postgres://certpilot:${DB_PASSWORD:?请在 .env 中设置}@db:5432/certpilot?sslmode=disable
+      CP_MASTER_KEY: ${CP_MASTER_KEY:?请先运行 make genkey 生成主密钥}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:                            # 接口 + 调度 + 执行，同一进程
+    build: ./server
+    image: certpilot/server:${TAG:-dev}
+    command: ["serve"]
+    environment:
+      CP_DB_DSN: postgres://certpilot:${DB_PASSWORD:?请在 .env 中设置}@db:5432/certpilot?sslmode=disable
+      CP_MASTER_KEY: ${CP_MASTER_KEY:?请先运行 make genkey 生成主密钥}
+      CP_ACME_DIRECTORY: ${CP_ACME_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}
+    depends_on:
+      db:
+        condition: service_healthy
+      # 迁移跑完才启动，避免服务在旧 schema 上运行
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  db:                             # 不映射宿主端口
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: certpilot
+      POSTGRES_USER: certpilot
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U certpilot -d certpilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata:
