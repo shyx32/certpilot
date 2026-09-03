@@ -13,8 +13,11 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -171,6 +174,13 @@ func TestIntegrationDeployReplacesLiveCertificate(t *testing.T) {
 		t.Errorf("远端证书与下发内容不一致\n远端:\n%s\n下发:\n%s", after, certPEM)
 	}
 
+	// 线上真的换了吗——这是整条链路唯一有意义的终点断言。
+	//
+	// 它必须留在这个测试里，紧挨着它验证的那次部署：放到全部测试跑完之后
+	// 从外部检查，结果会被后续测试的副作用影响（例如故意制造失败的那个），
+	// 那样的断言时灵时不灵。
+	assertLiveCert(t, string(certPEM))
+
 	// 私钥权限必须是 600——它和证书不同，不能让同机其他用户读到。
 	perm := run(t, c, []string{"stat", "-c", "%a", "/etc/nginx/certs/test.local/privkey.pem"})
 	if strings.TrimSpace(perm) != "600" {
@@ -225,6 +235,73 @@ func TestIntegrationPreflightFailureLeavesLiveFileIntact(t *testing.T) {
 	if out := run(t, c, testArgv); !strings.Contains(out, "successful") {
 		t.Errorf("失败后 nginx 配置不再有效: %s", out)
 	}
+}
+
+// assertLiveCert 连上目标机的 HTTPS 端口，确认它提供的正是这张证书。
+//
+// nginx reload 后新 worker 才加载新证书，因此给一个短重试窗口。
+func assertLiveCert(t *testing.T, wantPEM string) {
+	t.Helper()
+	addr := os.Getenv("CP_TEST_HTTPS_ADDR")
+	if addr == "" {
+		t.Log("未设置 CP_TEST_HTTPS_ADDR，跳过线上拨测")
+		return
+	}
+
+	blk, _ := pem.Decode([]byte(wantPEM))
+	if blk == nil {
+		t.Fatal("下发的证书不是合法 PEM")
+	}
+	sum := sha256.Sum256(blk.Bytes)
+	want := hex.EncodeToString(sum[:])
+
+	deadline := time.Now().Add(20 * time.Second)
+	var got string
+	for {
+		got = probeLive(t, addr)
+		if got == want {
+			t.Logf("线上证书已确认换新（%s…）", want[:12])
+			return
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("线上证书与下发的不一致\n线上 %s\n下发 %s", short(got), short(want))
+}
+
+func short(s string) string {
+	if len(s) > 16 {
+		return s[:16] + "…"
+	}
+	if s == "" {
+		return "（未取到）"
+	}
+	return s
+}
+
+func probeLive(t *testing.T, addr string) string {
+	t.Helper()
+	d := &tls.Dialer{Config: &tls.Config{
+		ServerName:         "test.local",
+		InsecureSkipVerify: true,
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+
+	state := conn.(*tls.Conn).ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(state.PeerCertificates[0].Raw)
+	return hex.EncodeToString(sum[:])
 }
 
 func run(t *testing.T, c *sshx.Client, argv []string) string {

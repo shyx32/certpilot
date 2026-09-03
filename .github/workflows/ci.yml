@@ -86,11 +86,19 @@ jobs:
             -p 2222:22 -p 8443:443 \
             -e AUTHORIZED_KEY="$(cat /tmp/cp_test_key.pub)" \
             certpilot-test-target
+
+          # sshd 与 nginx 都要就绪才能开跑。
+          # 只等 sshd 会让探测在 nginx 还没起来时执行，结论全部走偏。
           for i in $(seq 1 30); do
-            nc -z 127.0.0.1 2222 && break
+            nc -z 127.0.0.1 2222 && nc -z 127.0.0.1 8443 && break
             sleep 1
           done
+          nc -z 127.0.0.1 2222 || { echo "sshd 未就绪"; docker logs certpilot-target; exit 1; }
+          nc -z 127.0.0.1 8443 || { echo "nginx 未就绪"; docker logs certpilot-target; exit 1; }
 
+      # 「线上是否真的换证」的断言在测试内部完成（CP_TEST_HTTPS_ADDR），
+      # 紧挨着它验证的那次部署。放到全部测试跑完之后再从外部检查，
+      # 结果会被后续测试的副作用影响，那样的断言时灵时不灵。
       - name: 运行集成测试
         working-directory: server
         env:
@@ -98,17 +106,19 @@ jobs:
           CP_TEST_SSH_PORT: "2222"
           CP_TEST_SSH_USER: deploy
           CP_TEST_SSH_KEY: /tmp/cp_test_key
+          CP_TEST_HTTPS_ADDR: 127.0.0.1:8443
         run: go test -tags integration ./internal/nginxsvc/ -v
 
-      - name: 确认线上证书确实被替换
+      - name: 失败时收集诊断信息
+        if: failure()
         run: |
-          subject=$(echo | openssl s_client -connect 127.0.0.1:8443 -servername test.local 2>/dev/null \
-            | openssl x509 -noout -subject)
-          echo "$subject"
-          echo "$subject" | grep -q "integration-test.example" || {
-            echo "线上证书未被替换成集成测试下发的那张"
-            exit 1
-          }
+          echo "=== 容器日志 ==="
+          docker logs certpilot-target 2>&1 | tail -30
+          echo "=== 证书目录 ==="
+          docker exec certpilot-target ls -la /etc/nginx/certs/test.local/ || true
+          echo "=== 线上证书 ==="
+          echo | openssl s_client -connect 127.0.0.1:8443 -servername test.local 2>/dev/null \
+            | openssl x509 -noout -subject -dates || true
 
   images:
     name: 镜像构建
