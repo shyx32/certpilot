@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: 后端
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: server/go.sum
+
+      - name: 格式检查
+        working-directory: server
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未格式化，请运行 gofmt -w ."
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        working-directory: server
+        run: go vet ./...
+
+      # 竞态检测能抓到探测与部署里的并发问题，值得在 CI 上常开
+      - name: 测试（含竞态检测）
+        working-directory: server
+        run: go test -race ./...
+
+      - name: 构建
+        working-directory: server
+        run: go build ./...
+
+  frontend:
+    name: 前端
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 安装依赖
+        working-directory: web
+        run: npm ci
+
+      - name: 类型检查
+        working-directory: web
+        run: npx tsc --noEmit
+
+      - name: 构建
+        working-directory: web
+        run: npm run build
+
+  integration:
+    name: 集成测试（真实 SSH + nginx）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: server/go.sum
+
+      - name: 生成测试密钥
+        run: ssh-keygen -t ed25519 -N "" -f /tmp/cp_test_key -q
+
+      # 目标机刻意配置成生产常见形态：能写证书目录，但 nginx 主进程是 root
+      - name: 启动目标机
+        run: |
+          docker build -t certpilot-test-target ./test/target
+          docker run -d --name certpilot-target \
+            -p 2222:22 -p 8443:443 \
+            -e AUTHORIZED_KEY="$(cat /tmp/cp_test_key.pub)" \
+            certpilot-test-target
+          for i in $(seq 1 30); do
+            nc -z 127.0.0.1 2222 && break
+            sleep 1
+          done
+
+      - name: 运行集成测试
+        working-directory: server
+        env:
+          CP_TEST_SSH_HOST: 127.0.0.1
+          CP_TEST_SSH_PORT: "2222"
+          CP_TEST_SSH_USER: deploy
+          CP_TEST_SSH_KEY: /tmp/cp_test_key
+        run: go test -tags integration ./internal/nginxsvc/ -v
+
+      - name: 确认线上证书确实被替换
+        run: |
+          subject=$(echo | openssl s_client -connect 127.0.0.1:8443 -servername test.local 2>/dev/null \
+            | openssl x509 -noout -subject)
+          echo "$subject"
+          echo "$subject" | grep -q "integration-test.example" || {
+            echo "线上证书未被替换成集成测试下发的那张"
+            exit 1
+          }
+
+  images:
+    name: 镜像构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 构建后端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 构建前端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: ./web
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

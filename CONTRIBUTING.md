@@ -17,8 +17,17 @@ cd web && npm install && npm run dev
 
 ```bash
 make test                    # go test + go vet
-cd server && go test -race ./...
+cd server && gofmt -l . && go test -race ./...
 cd web && npx tsc --noEmit && npm run build
+```
+
+CI 会跑同样的检查，外加一轮针对真实 SSH + nginx 目标机的集成测试
+（见 [test/README.md](test/README.md)）。
+
+需要手工建用户或重置密码时，可以用这个辅助命令生成 bcrypt 哈希：
+
+```bash
+cd server && CP_HASH_PASSWORD='新密码' go test ./internal/auth/ -run TestGenerateHashForOps -v
 ```
 
 ## 分支命名
