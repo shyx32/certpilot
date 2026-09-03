@@ -187,9 +187,11 @@ function ServiceCard({ svc }: { svc: ServerService }) {
     onSuccess: setDry,
   });
 
+  // 标题取能区分实例的那个名字；形态由旁边的徽章表达，不要重复。
+  // 宿主机形态下一台机器只有一个 nginx，用主机名即可。
   const title = svc.compose_service
     ? `${svc.compose_project} / ${svc.compose_service}`
-    : (svc.container_name ?? kindLabels[svc.kind]);
+    : (svc.container_name ?? svc.host_name ?? "nginx");
 
   return (
     <Card>

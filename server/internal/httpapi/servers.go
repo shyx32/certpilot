@@ -272,7 +272,8 @@ func (a *API) dryRunService(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if rec.UseSudo {
+	// 与部署保持一致：nginx 命令的提权判断独立于写文件的权限。
+	if rec.ReloadNeedsSudo || rec.UseSudo {
 		argv = sshx.WithSudo(argv)
 	}
 	res, err := client.Run(ctx, argv)

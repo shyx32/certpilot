@@ -114,20 +114,22 @@ func (s *Store) MarkHostProbed(ctx context.Context, id int64, ok bool, errMsg st
 
 // ServerService 是一台主机上的一个 nginx 实例。
 type ServerService struct {
-	ID              int64           `json:"id"`
-	SSHHostID       int64           `json:"ssh_host_id"`
-	HostName        string          `json:"host_name,omitempty"`
-	Kind            string          `json:"kind"`
-	ComposeProject  *string         `json:"compose_project,omitempty"`
-	ComposeService  *string         `json:"compose_service,omitempty"`
-	ContainerName   *string         `json:"container_name,omitempty"`
-	ContainerImage  *string         `json:"container_image,omitempty"`
-	ContainerUser   *string         `json:"container_user,omitempty"`
-	Mounts          json.RawMessage `json:"mounts"`
-	WriteStrategy   string          `json:"write_strategy"`
-	StrategyReason  *string         `json:"strategy_reason,omitempty"`
-	TestArgv        []string        `json:"test_argv"`
-	ReloadArgv      []string        `json:"reload_argv"`
+	ID             int64           `json:"id"`
+	SSHHostID      int64           `json:"ssh_host_id"`
+	HostName       string          `json:"host_name,omitempty"`
+	Kind           string          `json:"kind"`
+	ComposeProject *string         `json:"compose_project,omitempty"`
+	ComposeService *string         `json:"compose_service,omitempty"`
+	ContainerName  *string         `json:"container_name,omitempty"`
+	ContainerImage *string         `json:"container_image,omitempty"`
+	ContainerUser  *string         `json:"container_user,omitempty"`
+	Mounts         json.RawMessage `json:"mounts"`
+	WriteStrategy  string          `json:"write_strategy"`
+	StrategyReason *string         `json:"strategy_reason,omitempty"`
+	TestArgv       []string        `json:"test_argv"`
+	ReloadArgv     []string        `json:"reload_argv"`
+	// ReloadNeedsSudo 由探测判定：nginx 主进程是 root 而登录用户不是时为真。
+	ReloadNeedsSudo bool            `json:"reload_needs_sudo"`
 	UseSudo         bool            `json:"use_sudo"`
 	IsCustom        bool            `json:"is_custom"`
 	DiscoveredCerts json.RawMessage `json:"discovered_certs"`
@@ -163,12 +165,13 @@ func (s *Store) SaveDetectedServices(ctx context.Context, hostID int64, services
 			INSERT INTO server_service
 				(ssh_host_id, kind, compose_project, compose_service, container_name,
 				 container_image, container_user, mounts, write_strategy, strategy_reason,
-				 test_argv, reload_argv, discovered_certs, notes, detected_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())`,
+				 test_argv, reload_argv, reload_needs_sudo, discovered_certs, notes, detected_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())`,
 			hostID, string(svc.Kind), nullable(svc.ComposeProject), nullable(svc.ComposeService),
 			nullable(svc.ContainerName), nullable(svc.Image), nullable(svc.ContainerUser),
 			mounts, string(svc.WriteStrategy), nullable(svc.StrategyReason),
-			toJSON(svc.TestArgv), toJSON(svc.ReloadArgv), certs, notes); err != nil {
+			toJSON(svc.TestArgv), toJSON(svc.ReloadArgv), svc.ReloadNeedsSudo,
+			certs, notes); err != nil {
 			return err
 		}
 	}
@@ -189,7 +192,7 @@ func toJSON(v []string) []byte {
 
 const serverServiceCols = `s.id, s.ssh_host_id, h.name, s.kind, s.compose_project, s.compose_service,
 	s.container_name, s.container_image, s.container_user, s.mounts, s.write_strategy,
-	s.strategy_reason, s.test_argv, s.reload_argv, s.use_sudo, s.is_custom,
+	s.strategy_reason, s.test_argv, s.reload_argv, s.reload_needs_sudo, s.use_sudo, s.is_custom,
 	s.discovered_certs, s.notes, s.enabled, s.detected_at`
 
 func scanServerService(row pgx.Row) (*ServerService, error) {
@@ -197,7 +200,7 @@ func scanServerService(row pgx.Row) (*ServerService, error) {
 	var testArgv, reloadArgv []byte
 	err := row.Scan(&s.ID, &s.SSHHostID, &s.HostName, &s.Kind, &s.ComposeProject, &s.ComposeService,
 		&s.ContainerName, &s.ContainerImage, &s.ContainerUser, &s.Mounts, &s.WriteStrategy,
-		&s.StrategyReason, &testArgv, &reloadArgv, &s.UseSudo, &s.IsCustom,
+		&s.StrategyReason, &testArgv, &reloadArgv, &s.ReloadNeedsSudo, &s.UseSudo, &s.IsCustom,
 		&s.DiscoveredCerts, &s.Notes, &s.Enabled, &s.DetectedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -259,15 +262,16 @@ func (s *Store) UpdateServiceCommands(ctx context.Context, id int64, test, reloa
 // ToService 把库中记录还原成探测模型，供部署使用。
 func (r *ServerService) ToService() *nginxsvc.Service {
 	svc := &nginxsvc.Service{
-		Kind:           nginxsvc.Kind(r.Kind),
-		ContainerName:  deref(r.ContainerName),
-		ComposeProject: deref(r.ComposeProject),
-		ComposeService: deref(r.ComposeService),
-		Image:          deref(r.ContainerImage),
-		ContainerUser:  deref(r.ContainerUser),
-		TestArgv:       r.TestArgv,
-		ReloadArgv:     r.ReloadArgv,
-		WriteStrategy:  nginxsvc.WriteStrategy(r.WriteStrategy),
+		Kind:            nginxsvc.Kind(r.Kind),
+		ContainerName:   deref(r.ContainerName),
+		ComposeProject:  deref(r.ComposeProject),
+		ComposeService:  deref(r.ComposeService),
+		Image:           deref(r.ContainerImage),
+		ContainerUser:   deref(r.ContainerUser),
+		TestArgv:        r.TestArgv,
+		ReloadArgv:      r.ReloadArgv,
+		ReloadNeedsSudo: r.ReloadNeedsSudo,
+		WriteStrategy:   nginxsvc.WriteStrategy(r.WriteStrategy),
 	}
 	_ = json.Unmarshal(r.Mounts, &svc.Mounts)
 	_ = json.Unmarshal(r.DiscoveredCerts, &svc.Certs)
