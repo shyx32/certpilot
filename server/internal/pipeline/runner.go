@@ -3,6 +3,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"github.com/certpilot/server/internal/domain"
 	"github.com/certpilot/server/internal/events"
 	"github.com/certpilot/server/internal/provider/deploy"
+	"github.com/certpilot/server/internal/provider/deploy/sshnginx"
 	dnsprov "github.com/certpilot/server/internal/provider/dns"
 	"github.com/certpilot/server/internal/store"
 )
@@ -234,7 +236,17 @@ func (r *Runner) deployOne(ctx context.Context, job *store.Job, cfg *store.CertC
 			return fmt.Errorf("读取凭据失败: %w", err)
 		}
 	}
-	d, err := factory(ctx, target.Params, secret)
+
+	// SSH 类目标需要主机与服务信息，它们存在别的表里，
+	// 由编排层读出后注入 params——这样 provider 本身仍然无状态。
+	params := target.Params
+	if target.ServerServiceID != nil {
+		if params, err = r.enrichSSHParams(ctx, params, *target.ServerServiceID, cfg); err != nil {
+			return err
+		}
+	}
+
+	d, err := factory(ctx, params, secret)
 	if err != nil {
 		return err
 	}
@@ -287,6 +299,71 @@ func (r *Runner) verifyWithRetry(ctx context.Context, job *store.Job,
 		}
 	}
 	return fmt.Errorf("在 %s 内未确认生效: %w", window.Max, lastErr)
+}
+
+// enrichSSHParams 把主机连接信息与探测到的服务形态注入部署参数。
+func (r *Runner) enrichSSHParams(ctx context.Context, raw json.RawMessage,
+	serviceID int64, cfg *store.CertConfig) (json.RawMessage, error) {
+
+	rec, err := r.store.GetService(ctx, serviceID)
+	if err != nil {
+		return nil, fmt.Errorf("读取服务信息失败: %w", err)
+	}
+	host, err := r.store.GetSSHHost(ctx, rec.SSHHostID)
+	if err != nil {
+		return nil, fmt.Errorf("读取主机信息失败: %w", err)
+	}
+
+	var m map[string]json.RawMessage
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil, fmt.Errorf("部署目标配置无法解析: %w", err)
+		}
+	}
+	if m == nil {
+		m = map[string]json.RawMessage{}
+	}
+
+	spec := sshnginx.HostSpec{
+		Host: host.Host, Port: host.Port, User: host.Username,
+	}
+	if host.HostKeyFP != nil {
+		spec.Fingerprint = *host.HostKeyFP
+	}
+	if host.JumpHostID != nil {
+		if jump, err := r.store.GetSSHHost(ctx, *host.JumpHostID); err == nil {
+			js := &sshnginx.HostSpec{Host: jump.Host, Port: jump.Port, User: jump.Username}
+			if jump.HostKeyFP != nil {
+				js.Fingerprint = *jump.HostKeyFP
+			}
+			if sec, err := r.store.Secret(ctx, jump.CredentialID); err == nil {
+				js2 := json.RawMessage(sec)
+				spec.JumpSecret = js2
+			}
+			spec.Jump = js
+		}
+	}
+
+	m["host"], _ = json.Marshal(spec)
+	m["service"], _ = json.Marshal(rec.ToService())
+	// 没有显式配置拨测域名时，用证书自身的域名（去掉通配符）。
+	if _, ok := m["verify_domains"]; !ok {
+		m["verify_domains"], _ = json.Marshal(verifiableDomains(cfg.Domains))
+	}
+	return json.Marshal(m)
+}
+
+// verifiableDomains 过滤出可以直接拨测的域名。
+//
+// 通配符本身不能解析，跳过它——否则每次都会因为连不上而判定未生效。
+func verifiableDomains(domains []string) []string {
+	out := []string{}
+	for _, d := range domains {
+		if !strings.HasPrefix(d, "*.") {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func (r *Runner) dnsProvider(ctx context.Context, credentialID int64) (dnsprov.Provider, error) {

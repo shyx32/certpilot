@@ -46,8 +46,15 @@ CertPilot 针对这些做了具体设计：流水线的终点是 `已生效`（�
 
 **部署与验证**
 - 阿里云 CDN（经 CAS 两段式：一次上传，多域名绑定，可回滚到上一个 CertId）
+- **自建 Nginx（经 SSH）**：自动识别宿主机 systemd / 宿主机直管 / Docker 三种形态
 - 部署后带重试窗口拨测，指纹一致才算完成
 - 单个目标失败不影响其余目标
+
+**服务器接入**
+- 添加一台机器后一键探测：认出 nginx 形态、解析 Docker 挂载映射、选定写入策略
+- `nginx -T` 反向发现配置里已有的证书与域名，接入时不必手工录入
+- 「试运行」只跑预检命令，不碰任何证书文件——配置错误在这里就暴露
+- 写入权限与重载权限**分别探测**：能写证书目录不代表能向 root 启动的 master 进程发信号
 
 **使用体验**
 - 一条 `docker compose up` 起步，三个容器
@@ -102,6 +109,24 @@ docker compose logs api | grep -A3 初始管理员
 
 `api` 镜像同时提供 `serve` 与 `worker` 子命令。规模远超预期时，
 在编排文件里加一个 `command: ["worker"]` 的服务即可拆开——**改的是编排，不是代码**。
+
+### 部署到 Nginx
+
+三种写入策略在探测阶段自动判定：
+
+| 探测到 | 策略 |
+| --- | --- |
+| bind mount，SSH 用户可写 | 直写宿主机 |
+| bind mount，属主 root | sudo 直写 |
+| named volume / 自定义 driver | 辅助容器（`docker run --rm --volumes-from`） |
+
+named volume 默认走辅助容器：`/var/lib/docker/volumes` 是 700 的 root 目录，
+在 `docker` 组里意味着能指挥 daemon，并不意味着能用自己的身份读写它。
+
+下发顺序是**先替换、再预检、最后重载**：`nginx -t` 读的是配置里写死的路径，
+新证书还在 `.new` 里时预检验的仍是旧文件，等于没验。而替换磁盘文件对正在运行的
+nginx 是安全的（它用内存里已加载的证书，只有 reload 才重新读盘），
+所以把替换提前，预检才真正验到新证书；任何一步失败都回滚。
 
 ### 签发流水线
 
@@ -170,6 +195,8 @@ cd server && go test -race ./...
 cd web && npm run dev        # 前端开发服务器，自动代理 /api 与 /ws
 ```
 
+针对真实 SSH 目标机的集成测试见 [test/README.md](test/README.md)。
+
 ```
 server/                      Go 后端
   internal/
@@ -178,6 +205,8 @@ server/                      Go 后端
     acme/                    ACME 客户端与错误翻译
     aliyun/                  阿里云凭据、RAM 策略与子账号创建
     pipeline/                签发流水线状态机
+    sshx/                    SSH 连接、shell 转义、命令执行
+    nginxsvc/                nginx 形态探测、挂载映射反查、证书下发
     provider/dns|deploy/     DNS 与部署适配器（注册表模式）
     scheduler/               到期扫描与任务执行
     store/                   数据访问与迁移
@@ -192,11 +221,12 @@ web/                         React + shadcn/ui + Vite
 
 已完成的是 M1。后续：
 
-- **M2** SSH 主机管理、nginx 四形态探测（宿主 systemd / 宿主直管 / Docker compose / 独立容器）、
-  挂载映射反查与三种写入策略、`nginx -T` 反向发现已有证书并批量导入
 - **M3** 每日巡检（证书链完整性、指纹一致性、吊销状态）、腾讯云 / Cloudflare DNS、
   SLB / OSS / K8s / Webhook 部署、多 CA 故障转移、通知渠道
 - **M4** RBAC 细化、可分享的只读健康看板、Prometheus 指标、OpenAPI 与 CLI、AK 轮换
+
+M2（SSH 主机管理、nginx 形态探测、三种写入策略、证书反向发现）已完成，
+带一套针对真实 SSH 目标机的集成测试，见 [test/README.md](test/README.md)。
 
 ## License
 

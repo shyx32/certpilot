@@ -83,3 +83,12 @@ func queryInt(r *http.Request, name string, def int) int {
 func chiURLParam(r *http.Request, name string) string {
 	return chi.URLParam(r, name)
 }
+
+// parseID 解析查询参数里的数字 ID。
+func parseID(v string) (int64, bool) {
+	id, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
+}

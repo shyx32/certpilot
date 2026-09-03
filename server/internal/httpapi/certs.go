@@ -346,10 +346,11 @@ func (a *API) listTargets(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) createTarget(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name         string          `json:"name"`
-		Kind         string          `json:"kind"`
-		CredentialID *int64          `json:"credential_id"`
-		Params       json.RawMessage `json:"params"`
+		Name            string          `json:"name"`
+		Kind            string          `json:"kind"`
+		CredentialID    *int64          `json:"credential_id"`
+		ServerServiceID *int64          `json:"server_service_id"`
+		Params          json.RawMessage `json:"params"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -358,9 +359,14 @@ func (a *API) createTarget(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "名称与类型都是必填项")
 		return
 	}
+	// SSH 类目标的连接信息来自服务记录，没有它就无从下发。
+	if req.Kind == "ssh_nginx" && req.ServerServiceID == nil {
+		fail(w, http.StatusBadRequest, "请先选择一个已探测到的 nginx 服务")
+		return
+	}
 	id, err := a.store.CreateDeployTarget(r.Context(), &store.DeployTarget{
 		Name: req.Name, Kind: req.Kind, CredentialID: req.CredentialID,
-		Params: req.Params, Enabled: true,
+		ServerServiceID: req.ServerServiceID, Params: req.Params, Enabled: true,
 	})
 	if err != nil {
 		failErr(w, err, "创建部署目标失败")

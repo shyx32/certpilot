@@ -1,6 +1,6 @@
 import { NavLink, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard, ShieldCheck, Server, KeyRound,
+  LayoutDashboard, ShieldCheck, Server, KeyRound, HardDrive,
   ScrollText, Settings2, Moon, Sun, LogOut, ChevronRight,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -19,6 +19,7 @@ const groups = [
   {
     label: "接入",
     items: [
+      { to: "/servers", icon: HardDrive, label: "服务器" },
       { to: "/targets", icon: Server, label: "部署目标" },
       // 凭据独立成项：它是全系统权限最敏感的地方，
       // 单独一栏比藏进设置二级菜单更容易被审视。
@@ -38,6 +39,7 @@ const groups = [
 const crumbs: Record<string, string> = {
   "/": "仪表盘",
   "/certificates": "证书列表",
+  "/servers": "服务器",
   "/targets": "部署目标",
   "/credentials": "凭据",
   "/jobs": "任务与日志",

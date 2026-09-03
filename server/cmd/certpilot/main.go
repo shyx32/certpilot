@@ -29,6 +29,7 @@ import (
 	// 注册各 provider 实现。它们通过 init 把自己登记进注册表，
 	// 编排层因此不需要认识任何具体厂商。
 	_ "github.com/certpilot/server/internal/provider/deploy/aliyuncdn"
+	_ "github.com/certpilot/server/internal/provider/deploy/sshnginx"
 	_ "github.com/certpilot/server/internal/provider/dns/alidns"
 )
 

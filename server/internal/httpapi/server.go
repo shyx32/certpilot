@@ -98,6 +98,21 @@ func New(st *store.Store, hub *events.Hub, challenges *ChallengeStore, sessions 
 				r.With(a.requireAdmin).Delete("/{id}", a.deleteTarget)
 			})
 
+			r.Route("/servers", func(r chi.Router) {
+				r.Get("/", a.listServers)
+				r.Post("/{id}/detect", a.detectServer)
+				// 新增与删除主机会改变系统能触达的范围，限管理员。
+				r.With(a.requireAdmin).Post("/", a.createServer)
+				r.With(a.requireAdmin).Delete("/{id}", a.deleteServer)
+			})
+
+			r.Route("/services", func(r chi.Router) {
+				r.Get("/", a.listServices)
+				r.Post("/{id}/dry-run", a.dryRunService)
+				// 自定义命令是特权操作：它决定了远端要执行什么。
+				r.With(a.requireAdmin).Put("/{id}/commands", a.updateServiceCommands)
+			})
+
 			r.Route("/jobs", func(r chi.Router) {
 				r.Get("/", a.listJobs)
 				r.Get("/{id}", a.getJob)

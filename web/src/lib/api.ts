@@ -158,3 +158,73 @@ export interface DomainResolution {
   credential?: string;
   reason?: string;
 }
+
+export interface SSHHost {
+  id: number;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  credential_id: number;
+  host_key_fp?: string;
+  last_probe_at?: string;
+  last_probe_ok?: boolean;
+  last_probe_err?: string;
+  service_count: number;
+  created_at: string;
+}
+
+export interface Mount {
+  Type: string;
+  Source: string;
+  Destination: string;
+  RW: boolean;
+  Name?: string;
+}
+
+export interface CertUsage {
+  CertPath: string;
+  KeyPath: string;
+  Domains: string[];
+}
+
+export interface ServerService {
+  id: number;
+  ssh_host_id: number;
+  host_name?: string;
+  kind: "nginx_systemd" | "nginx_bare" | "nginx_docker";
+  compose_project?: string;
+  compose_service?: string;
+  container_name?: string;
+  container_image?: string;
+  container_user?: string;
+  mounts: Mount[];
+  write_strategy: "host" | "host_sudo" | "helper";
+  strategy_reason?: string;
+  test_argv: string[];
+  reload_argv: string[];
+  reload_needs_sudo?: boolean;
+  use_sudo: boolean;
+  is_custom: boolean;
+  discovered_certs: CertUsage[];
+  notes: string[];
+  enabled: boolean;
+  detected_at?: string;
+}
+
+export interface DetectResult {
+  detection: {
+    docker_available: boolean;
+    sudo_available: boolean;
+    port_443?: string;
+    notes?: string[];
+  };
+  services: ServerService[];
+}
+
+export interface DryRunResult {
+  ok: boolean;
+  exit_code?: number;
+  command?: string[];
+  output: string;
+}
