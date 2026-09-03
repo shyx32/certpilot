@@ -212,6 +212,8 @@ func (s *Scheduler) execute(ctx context.Context, job *store.Job) {
 		err = s.syncZones(ctx, job)
 	case "health_scan":
 		err = s.runHealthScan(ctx, job)
+	case "rollback":
+		err = s.runner.Rollback(ctx, job)
 	default:
 		err = s.store.FailJob(ctx, job,
 			"未知任务类型 "+job.Kind, domain.RetryNever)

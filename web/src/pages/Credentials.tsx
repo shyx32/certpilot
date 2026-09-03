@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
+import { KeyRound, RefreshCcwDot, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { api, type Credential } from "@/lib/api";
 import { formatTime } from "@/lib/format";
 import { PageHeader } from "@/components/layout/page";
@@ -23,6 +23,7 @@ export function Credentials() {
   const qc = useQueryClient();
   const [manualOpen, setManualOpen] = useState(false);
   const [autoOpen, setAutoOpen] = useState(false);
+  const [rotating, setRotating] = useState<Credential>();
 
   const q = useQuery({ queryKey: ["credentials"], queryFn: () => api.get<Credential[]>("/credentials") });
   const refresh = () => qc.invalidateQueries({ queryKey: ["credentials"] });
@@ -129,6 +130,16 @@ export function Credentials() {
                         >
                           <RefreshCw className="size-3.5" />
                         </Button>
+                        {c.origin === "auto" && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            title="轮换 AccessKey"
+                            onClick={() => setRotating(c)}
+                          >
+                            <RefreshCcwDot className="size-3.5" />
+                          </Button>
+                        )}
                         <Button
                           variant="ghost"
                           size="sm"
@@ -152,6 +163,11 @@ export function Credentials() {
 
       <ManualDialog open={manualOpen} onClose={() => setManualOpen(false)} onDone={refresh} />
       <ProvisionDialog open={autoOpen} onClose={() => setAutoOpen(false)} onDone={refresh} />
+      <RotateDialog
+        credential={rotating}
+        onClose={() => setRotating(undefined)}
+        onDone={refresh}
+      />
     </>
   );
 }
@@ -304,6 +320,87 @@ function ProvisionDialog({ open, onClose, onDone }: { open: boolean; onClose: ()
           <Button type="submit" disabled={provision.isPending || caps.length === 0}>
             {provision.isPending ? "创建中…" : "创建子账号"}
           </Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
+/**
+ * AK 轮换。顺序是「建新 → 验证 → 入库 → 删旧」，
+ * 任何一步失败都停在安全状态：旧 AccessKey 始终可用，
+ * 直到新的被确认能工作。
+ */
+function RotateDialog({
+  credential, onClose, onDone,
+}: {
+  credential?: Credential;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [form, setForm] = useState({ admin_access_key_id: "", admin_access_key_secret: "" });
+  const [warning, setWarning] = useState<string>();
+
+  const m = useMutation({
+    mutationFn: () => api.post<{ warning?: string }>(`/credentials/${credential!.id}/rotate`, form),
+    onSuccess: (r) => {
+      onDone();
+      if (r.warning) {
+        setWarning(r.warning);
+      } else {
+        onClose();
+      }
+    },
+  });
+
+  return (
+    <Dialog
+      open={!!credential}
+      onClose={onClose}
+      title={`轮换「${credential?.name ?? ""}」的 AccessKey`}
+      description="管理凭据只用于本次轮换，不会被保存。"
+      className="max-w-xl"
+    >
+      <form className="flex flex-col gap-4" onSubmit={(e) => { e.preventDefault(); m.mutate(); }}>
+        <div className="bg-muted text-muted-foreground rounded-md p-3 text-xs">
+          轮换需要管理凭据：子账号自己没有创建 AccessKey 的权限——这正是最小权限的应有之义。
+          RAM 用户最多持有两把 AccessKey，因此可以先建新的、确认能用，再删掉旧的，全程不中断。
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="管理 AccessKey ID">
+            <Input
+              value={form.admin_access_key_id}
+              onChange={(e) => setForm({ ...form, admin_access_key_id: e.target.value })}
+              required
+            />
+          </Field>
+          <Field label="管理 AccessKey Secret">
+            <Input
+              type="password"
+              value={form.admin_access_key_secret}
+              onChange={(e) => setForm({ ...form, admin_access_key_secret: e.target.value })}
+              required
+            />
+          </Field>
+        </div>
+
+        {m.error && <ErrorNote error={m.error} />}
+        {warning && (
+          <div className="bg-warn-soft text-warn rounded-md border border-warn/30 p-3 text-xs">
+            {warning}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={onClose}>
+            {warning ? "关闭" : "取消"}
+          </Button>
+          {!warning && (
+            <Button type="submit" disabled={m.isPending}>
+              {m.isPending ? "轮换中…" : "开始轮换"}
+            </Button>
+          )}
         </div>
       </form>
     </Dialog>

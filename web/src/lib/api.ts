@@ -292,3 +292,14 @@ export interface ProbeResult {
   tls_version: string;
   issues: Finding[];
 }
+
+export interface ShareLink {
+  id: number;
+  token: string;
+  name: string;
+  enabled: boolean;
+  expires_at?: string;
+  created_by?: string;
+  last_seen_at?: string;
+  created_at: string;
+}

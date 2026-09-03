@@ -4,6 +4,7 @@
 //	certpilot worker    只跑调度与执行，规模增长后可拆成独立容器
 //	certpilot migrate   执行数据库迁移，作为一次性容器运行
 //	certpilot genkey    生成加密主密钥
+//	certpilot cli …     命令行客户端，供 CI 与脚本调用
 package main
 
 import (
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/certpilot/server/internal/auth"
+	"github.com/certpilot/server/internal/cli"
 	"github.com/certpilot/server/internal/config"
 	"github.com/certpilot/server/internal/events"
 	"github.com/certpilot/server/internal/httpapi"
@@ -42,6 +44,15 @@ func main() {
 	cmd := "serve"
 	if len(os.Args) > 1 {
 		cmd = os.Args[1]
+	}
+
+	// cli 走 HTTP 接口，不需要数据库与主密钥。
+	if cmd == "cli" {
+		if err := cli.Run(context.Background(), os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// genkey 不需要数据库与配置，放在最前面。
@@ -99,7 +110,7 @@ func main() {
 	case "worker":
 		runWorker(ctx, cfg, st, hub, challenges)
 	default:
-		fatal(fmt.Errorf("未知命令 %q（可用：serve worker migrate genkey）", cmd))
+		fatal(fmt.Errorf("未知命令 %q（可用：serve worker migrate genkey cli）", cmd))
 	}
 }
 

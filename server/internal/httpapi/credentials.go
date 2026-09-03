@@ -237,3 +237,150 @@ func errText(err error) string {
 	}
 	return err.Error()
 }
+
+// rotateCredential 零停机更换子账号的 AccessKey。
+//
+// 顺序是刻意的：建新 → 验证能用 → 入库 → 删旧。
+// 反过来（先删旧）会在任何一步出错时让两把 AK 都不可用。
+func (a *API) rotateCredential(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		AdminAccessKeyID     string `json:"admin_access_key_id"`
+		AdminAccessKeySecret string `json:"admin_access_key_secret"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.AdminAccessKeyID == "" || req.AdminAccessKeySecret == "" {
+		fail(w, http.StatusBadRequest,
+			"轮换需要管理凭据：子账号自己没有创建 AccessKey 的权限，这正是最小权限的应有之义。")
+		return
+	}
+
+	ctx := r.Context()
+	cred, err := a.store.GetCredential(ctx, id)
+	if err != nil {
+		failErr(w, err, "读取凭据失败")
+		return
+	}
+	if cred.Origin != "auto" || cred.RAMUserName == nil {
+		fail(w, http.StatusBadRequest,
+			"只有由 CertPilot 创建的子账号才能自动轮换；手动录入的凭据请到控制台自行更换。")
+		return
+	}
+
+	// 取出当前 AK ID，验证通过后用它删除旧凭据。
+	oldSecret, err := a.store.Secret(ctx, id)
+	if err != nil {
+		failErr(w, err, "读取现有凭据失败")
+		return
+	}
+	oldCred, err := aliyun.ParseCredential(oldSecret)
+	if err != nil {
+		failErr(w, err, "现有凭据格式不正确")
+		return
+	}
+
+	// 1. 建新
+	res, err := aliyun.RotateAccessKey(ctx, &aliyun.RotateRequest{
+		AdminAccessKeyID:     req.AdminAccessKeyID,
+		AdminAccessKeySecret: req.AdminAccessKeySecret,
+		UserName:             *cred.RAMUserName,
+		OldAccessKeyID:       oldCred.AccessKeyID,
+	})
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	newSecret, err := aliyun.MarshalCredential(res.AccessKeyID, res.AccessKeySecret, oldCred.Region)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// 2. 入库。失败就撤销刚建的 AK——旧的还在用，线上不受影响。
+	if err := a.store.ReplaceSecret(ctx, id, newSecret); err != nil {
+		if revErr := aliyun.RevokeAccessKey(ctx, req.AdminAccessKeyID, req.AdminAccessKeySecret,
+			*cred.RAMUserName, res.AccessKeyID); revErr != nil {
+			fail(w, http.StatusInternalServerError,
+				"保存新凭据失败，且撤销新建 AccessKey 也失败，请手工删除 "+res.AccessKeyID)
+			return
+		}
+		failErr(w, err, "保存新凭据失败，已撤销新建的 AccessKey，原凭据仍然可用")
+		return
+	}
+
+	// 3. 验证新凭据能用。用不了就说明轮换有问题，但旧 AK 尚未删除，
+	//    用户可以按提示手工恢复。
+	if _, scanErr := scheduler.SyncZonesFor(ctx, a.store, id); scanErr != nil {
+		_ = a.store.MarkCredentialChecked(ctx, id, false, scanErr.Error())
+		fail(w, http.StatusBadGateway,
+			"新凭据已保存但校验失败："+scanErr.Error()+"。旧 AccessKey 尚未删除，可到控制台确认。")
+		return
+	}
+	_ = a.store.MarkCredentialChecked(ctx, id, true, "")
+
+	// 4. 删旧。到这一步新凭据已确认可用，删除是安全的。
+	warn := ""
+	if err := aliyun.RevokeAccessKey(ctx, req.AdminAccessKeyID, req.AdminAccessKeySecret,
+		*cred.RAMUserName, oldCred.AccessKeyID); err != nil {
+		warn = "新凭据已生效，但删除旧 AccessKey 失败，请到控制台手工删除 " + oldCred.AccessKeyID
+	}
+
+	a.store.Audit(ctx, actorOf(r), "rotate_credential", cred.Name,
+		map[string]any{"ram_user": *cred.RAMUserName})
+	resp := map[string]any{"ok": true, "new_access_key_id": res.AccessKeyID}
+	if warn != "" {
+		resp["warning"] = warn
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// upgradeCredential 更新子账号的权限策略。
+//
+// 子账号 AK 不变，无需重新分发；同样需要一次性的管理凭据，
+// 因为子账号自己没有改策略的权限。
+func (a *API) upgradeCredential(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		AdminAccessKeyID     string   `json:"admin_access_key_id"`
+		AdminAccessKeySecret string   `json:"admin_access_key_secret"`
+		Capabilities         []string `json:"capabilities"`
+		DNSResources         []string `json:"dns_resources"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.AdminAccessKeyID == "" || req.AdminAccessKeySecret == "" {
+		fail(w, http.StatusBadRequest, "更新策略需要管理凭据")
+		return
+	}
+
+	ctx := r.Context()
+	cred, err := a.store.GetCredential(ctx, id)
+	if err != nil {
+		failErr(w, err, "读取凭据失败")
+		return
+	}
+	if cred.Origin != "auto" || cred.RAMPolicyName == nil {
+		fail(w, http.StatusBadRequest, "只有由 CertPilot 创建的子账号才能自动更新策略。")
+		return
+	}
+
+	policyJSON, err := aliyun.UpdatePolicy(ctx, req.AdminAccessKeyID, req.AdminAccessKeySecret,
+		*cred.RAMPolicyName, toCaps(req.Capabilities), req.DNSResources)
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	a.store.Audit(ctx, actorOf(r), "upgrade_credential_policy", cred.Name,
+		map[string]any{"capabilities": req.Capabilities})
+	writeJSON(w, http.StatusOK, map[string]string{"policy": policyJSON})
+}

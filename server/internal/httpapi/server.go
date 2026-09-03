@@ -45,6 +45,10 @@ func New(st *store.Store, hub *events.Hub, challenges *ChallengeStore, sessions 
 
 	r.Post("/api/v1/auth/login", a.login)
 
+	// 只读看板：凭不可猜的 token 访问，不需要登录。
+	// 它只暴露域名与状态，不含任何运维细节。
+	r.Get("/api/v1/public/status/{token}", a.publicStatus)
+
 	// 指标端点需要登录：它会暴露全部域名，属于内部信息。
 	// 让 Prometheus 用一个只读账号抓取即可。
 	r.Group(func(r chi.Router) {
@@ -77,6 +81,8 @@ func New(st *store.Store, hub *events.Hub, challenges *ChallengeStore, sessions 
 					r.Post("/", a.createCredential)
 					r.Post("/policy-preview", a.previewPolicy)
 					r.Post("/provision", a.provisionCredential)
+					r.Post("/{id}/rotate", a.rotateCredential)
+					r.Post("/{id}/upgrade", a.upgradeCredential)
 					r.Delete("/{id}", a.deleteCredential)
 				})
 			})
@@ -93,6 +99,8 @@ func New(st *store.Store, hub *events.Hub, challenges *ChallengeStore, sessions 
 				r.Get("/{id}", a.getCertConfig)
 				r.Post("/{id}/issue", a.issueNow)
 				r.Get("/{id}/versions", a.listCertVersions)
+				// 回滚会改变线上正在提供的证书，限管理员。
+				r.With(a.requireAdmin).Post("/{id}/rollback", a.rollbackCert)
 				r.Get("/{id}/bindings", a.listBindings)
 				r.Post("/{id}/bindings", a.addBinding)
 				r.Delete("/{id}/bindings/{targetID}", a.removeBinding)
@@ -138,6 +146,13 @@ func New(st *store.Store, hub *events.Hub, challenges *ChallengeStore, sessions 
 				// 渠道配置里含 Webhook token，写操作限管理员。
 				r.With(a.requireAdmin).Post("/", a.createNotifyChannel)
 				r.With(a.requireAdmin).Delete("/{id}", a.deleteNotifyChannel)
+			})
+
+			r.Route("/share-links", func(r chi.Router) {
+				r.Get("/", a.listShareLinks)
+				// 分享链接会把状态暴露给未登录的人，限管理员创建。
+				r.With(a.requireAdmin).Post("/", a.createShareLink)
+				r.With(a.requireAdmin).Delete("/{id}", a.deleteShareLink)
 			})
 
 			r.Route("/jobs", func(r chi.Router) {

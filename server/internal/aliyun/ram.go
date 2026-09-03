@@ -182,3 +182,102 @@ func randomSuffix() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
+
+// RotateRequest 是一次 AccessKey 轮换。
+type RotateRequest struct {
+	AdminAccessKeyID     string
+	AdminAccessKeySecret string
+	// UserName 是要轮换的 RAM 用户。
+	UserName string
+	// OldAccessKeyID 是当前正在用的那把，验证通过后删除它。
+	OldAccessKeyID string
+}
+
+// RotateResult 是新生成的凭据。
+type RotateResult struct {
+	AccessKeyID     string
+	AccessKeySecret string
+}
+
+// RotateAccessKey 零停机地更换一把 AccessKey。
+//
+// RAM 用户最多持有 2 把 AK，正好够走「建新 → 验证 → 换用 → 删旧」这条路：
+// 任何一步失败都停在安全状态，旧 AK 始终可用，直到新的被确认能工作。
+//
+// 删除旧 AK 由调用方在新凭据入库成功后调用 RevokeAccessKey 完成——
+// 顺序很重要：先入库再删旧，反过来会在入库失败时让两把 AK 都不可用。
+func RotateAccessKey(ctx context.Context, req *RotateRequest) (*RotateResult, error) {
+	client, err := ram.NewClientWithAccessKey("cn-hangzhou",
+		req.AdminAccessKeyID, req.AdminAccessKeySecret)
+	if err != nil {
+		return nil, fmt.Errorf("管理凭据无效：%s", Explain(err))
+	}
+
+	ck := ram.CreateCreateAccessKeyRequest()
+	ck.UserName = req.UserName
+	if err := Prepare(ctx, ck); err != nil {
+		return nil, err
+	}
+	resp, err := client.CreateAccessKey(ck)
+	if err != nil {
+		return nil, fmt.Errorf("创建新 AccessKey 失败：%s", Explain(err))
+	}
+	return &RotateResult{
+		AccessKeyID:     resp.AccessKey.AccessKeyId,
+		AccessKeySecret: resp.AccessKey.AccessKeySecret,
+	}, nil
+}
+
+// UpdatePolicy 更新子账号的权限策略。
+//
+// 用户后来想加 SLB 部署时走这条路：子账号 AK 不变，无需重新分发。
+// 一个策略最多 5 个版本，因此先清掉非默认的旧版本再建新版。
+func UpdatePolicy(ctx context.Context, adminID, adminSecret, policyName string,
+	caps []Capability, dnsResources []string) (string, error) {
+
+	doc, err := BuildPolicy(caps, dnsResources)
+	if err != nil {
+		return "", err
+	}
+	policyJSON, err := doc.JSON()
+	if err != nil {
+		return "", err
+	}
+
+	client, err := ram.NewClientWithAccessKey("cn-hangzhou", adminID, adminSecret)
+	if err != nil {
+		return "", fmt.Errorf("管理凭据无效：%s", Explain(err))
+	}
+
+	// 先腾出版本空间：策略最多 5 个版本，满了会直接失败。
+	lv := ram.CreateListPolicyVersionsRequest()
+	lv.PolicyName = policyName
+	lv.PolicyType = "Custom"
+	if err := Prepare(ctx, lv); err == nil {
+		if versions, err := client.ListPolicyVersions(lv); err == nil {
+			for _, v := range versions.PolicyVersions.PolicyVersion {
+				if v.IsDefaultVersion {
+					continue
+				}
+				dv := ram.CreateDeletePolicyVersionRequest()
+				dv.PolicyName = policyName
+				dv.VersionId = v.VersionId
+				if err := Prepare(ctx, dv); err == nil {
+					_, _ = client.DeletePolicyVersion(dv)
+				}
+			}
+		}
+	}
+
+	cv := ram.CreateCreatePolicyVersionRequest()
+	cv.PolicyName = policyName
+	cv.PolicyDocument = policyJSON
+	cv.SetAsDefault = "true"
+	if err := Prepare(ctx, cv); err != nil {
+		return "", err
+	}
+	if _, err := client.CreatePolicyVersion(cv); err != nil {
+		return "", fmt.Errorf("更新策略失败：%s", Explain(err))
+	}
+	return policyJSON, nil
+}

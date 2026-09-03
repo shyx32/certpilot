@@ -302,3 +302,30 @@ func (s *Store) IssuanceCounts(ctx context.Context, registeredDomain string,
 		domains, windowDays).Scan(&duplicates)
 	return perDomain, duplicates, err
 }
+
+// CertificateByID 按版本 ID 取回证书及其私钥明文，用于回滚。
+func (s *Store) CertificateByID(ctx context.Context, id int64) (*Certificate, []byte, error) {
+	var c Certificate
+	var blob []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, cert_config_id, serial, fingerprint, cert_pem, chain_pem, key_enc,
+		       not_before, not_after, issuer, created_at
+		FROM certificate WHERE id=$1`, id).
+		Scan(&c.ID, &c.CertConfigID, &c.Serial, &c.Fingerprint, &c.CertPEM, &c.ChainPEM,
+			&blob, &c.NotBefore, &c.NotAfter, &c.Issuer, &c.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	var sealed secretbox.Sealed
+	if err := json.Unmarshal(blob, &sealed); err != nil {
+		return nil, nil, err
+	}
+	key, err := s.box.Open(&sealed, certificateAAD(c.ID))
+	if err != nil {
+		return nil, nil, err
+	}
+	return &c, key, nil
+}

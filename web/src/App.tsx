@@ -13,6 +13,7 @@ import { Targets } from "@/pages/Targets";
 import { Servers } from "@/pages/Servers";
 import { Health } from "@/pages/Health";
 import { Notifications } from "@/pages/Notifications";
+import { PublicStatus } from "@/pages/PublicStatus";
 import { JobDetail, Jobs } from "@/pages/Jobs";
 import { Settings } from "@/pages/Settings";
 
@@ -29,6 +30,17 @@ const qc = new QueryClient({
 });
 
 export default function App() {
+  // 只读状态页不需要登录，因此放在登录门禁之外，
+  // 也不套后台的 Shell——那里不该出现任何操作入口。
+  if (location.pathname.startsWith("/status/")) {
+    return (
+      <BrowserRouter>
+        <Routes>
+          <Route path="/status/:token" element={<PublicStatus />} />
+        </Routes>
+      </BrowserRouter>
+    );
+  }
   return (
     <QueryClientProvider client={qc}>
       <Gate />

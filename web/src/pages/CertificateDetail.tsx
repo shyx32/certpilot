@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { PlayCircle } from "lucide-react";
+import { History, PlayCircle } from "lucide-react";
 import { api, type Binding, type CertConfig, type CertVersion } from "@/lib/api";
 import { certStatus, formatDate, formatTime } from "@/lib/format";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -47,6 +47,17 @@ export function CertificateDetail() {
     },
   });
 
+  // 回滚只换线上跑的版本，库里最新一版不变——
+  // 这样下次续期仍从正确的基线出发。
+  const rollback = useMutation({
+    mutationFn: (certificateID: number) =>
+      api.post<{ job_id: number }>(`/certificates/${id}/rollback`, { certificate_id: certificateID }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+      qc.invalidateQueries({ queryKey: ["cert-bindings", id] });
+    },
+  });
+
   if (cert.isLoading) return <Loading />;
   if (cert.error) return <ErrorNote error={cert.error} onRetry={() => cert.refetch()} />;
   const c = cert.data!;
@@ -76,6 +87,12 @@ export function CertificateDetail() {
       </div>
 
       {issue.error && <div className="mb-4"><ErrorNote error={issue.error} /></div>}
+      {rollback.error && <div className="mb-4"><ErrorNote error={rollback.error} /></div>}
+      {rollback.isSuccess && (
+        <div className="bg-warn-soft text-warn mb-4 rounded-md border border-warn/30 p-3 text-sm">
+          回滚任务已提交（#{rollback.data.job_id}）。完成后线上会换回该版本，库中最新版本不变。
+        </div>
+      )}
 
       <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Info label="到期时间" value={formatDate(c.not_after)} />
@@ -167,7 +184,9 @@ export function CertificateDetail() {
       <Card>
         <CardHeader>
           <CardTitle>历史版本</CardTitle>
-          <CardDescription>保留最近 5 版，用于回滚与追溯线上跑的是哪一版。</CardDescription>
+          <CardDescription>
+            保留最近 5 版。新证书出问题时可以回滚到上一个已知可用的版本，不必等重新签发。
+          </CardDescription>
         </CardHeader>
         <CardContent className="px-0 pt-1">
           {versions.isLoading ? (
@@ -182,17 +201,42 @@ export function CertificateDetail() {
                   <TH>有效期至</TH>
                   <TH>颁发者</TH>
                   <TH className="w-full">指纹</TH>
+                  <TH className="w-px" />
                 </TR>
               </THead>
               <TBody>
-                {versions.data.map((v) => (
-                  <TR key={v.id}>
-                    <TD className="text-xs whitespace-nowrap">{formatTime(v.created_at)}</TD>
-                    <TD className="text-xs whitespace-nowrap">{formatDate(v.not_after)}</TD>
-                    <TD className="text-xs">{v.issuer}</TD>
-                    <TD className="font-mono text-xs">{v.fingerprint.slice(0, 16)}…</TD>
-                  </TR>
-                ))}
+                {versions.data.map((v, i) => {
+                  const expired = new Date(v.not_after) < new Date();
+                  return (
+                    <TR key={v.id}>
+                      <TD className="text-xs whitespace-nowrap">{formatTime(v.created_at)}</TD>
+                      <TD className="text-xs whitespace-nowrap">{formatDate(v.not_after)}</TD>
+                      <TD className="text-xs">{v.issuer}</TD>
+                      <TD className="font-mono text-xs">{v.fingerprint.slice(0, 16)}…</TD>
+                      <TD>
+                        {i === 0 ? (
+                          <span className="text-muted-foreground text-xs whitespace-nowrap">当前最新</span>
+                        ) : expired ? (
+                          <span className="text-muted-foreground text-xs whitespace-nowrap">已过期</span>
+                        ) : (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={rollback.isPending}
+                            onClick={() =>
+                              confirm(
+                                `把线上换回这一版？\n\n库中最新版本不变，下次续期仍从最新基线出发。`,
+                              ) && rollback.mutate(v.id)
+                            }
+                          >
+                            <History className="size-3.5" />
+                            回滚
+                          </Button>
+                        )}
+                      </TD>
+                    </TR>
+                  );
+                })}
               </TBody>
             </Table>
           )}

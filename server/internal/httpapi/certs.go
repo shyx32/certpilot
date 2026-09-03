@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/certpilot/server/internal/acme"
 	"github.com/certpilot/server/internal/dnsx"
+	"github.com/certpilot/server/internal/pipeline"
 	"github.com/certpilot/server/internal/store"
 )
 
@@ -385,4 +388,59 @@ func (a *API) deleteTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// rollbackCert 把线上换回某个历史版本。
+//
+// 证书版本化保存正是为了这一刻：新证书部署后发现问题，
+// 不必等重新签发就能退回上一个已知可用的版本。
+func (a *API) rollbackCert(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		CertificateID int64 `json:"certificate_id"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.CertificateID == 0 {
+		fail(w, http.StatusBadRequest, "请选择要回滚到的版本")
+		return
+	}
+
+	ctx := r.Context()
+	// 确认该版本确实属于这张证书，避免把别人的证书部署过去。
+	versions, err := a.store.ListCertificates(ctx, id)
+	if err != nil {
+		failErr(w, err, "读取证书版本失败")
+		return
+	}
+	var target *store.Certificate
+	for _, v := range versions {
+		if v.ID == req.CertificateID {
+			target = v
+		}
+	}
+	if target == nil {
+		fail(w, http.StatusBadRequest, "这个版本不属于该证书")
+		return
+	}
+	if time.Now().After(target.NotAfter) {
+		fail(w, http.StatusBadRequest, fmt.Sprintf(
+			"这一版已于 %s 过期，回滚过去会让线上立刻不可用。",
+			target.NotAfter.Format("2006-01-02")))
+		return
+	}
+
+	jobID, err := a.store.EnqueueJob(ctx, "rollback", &id,
+		pipeline.RollbackPayload{CertificateID: req.CertificateID})
+	if err != nil {
+		failErr(w, err, "投递回滚任务失败")
+		return
+	}
+	a.store.Audit(ctx, actorOf(r), "rollback_certificate", fmt.Sprint(id),
+		map[string]any{"certificate_id": req.CertificateID})
+	writeJSON(w, http.StatusAccepted, map[string]int64{"job_id": jobID})
 }

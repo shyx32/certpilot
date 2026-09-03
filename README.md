@@ -31,6 +31,7 @@ CertPilot 针对这些做了具体设计：流水线的终点是 `已生效`（�
 **签发与续期**
 - ACME v2（基于 [lego](https://github.com/go-acme/lego)），支持 Let's Encrypt 等任意 ACME CA
 - DNS-01 与 HTTP-01；通配符证书；一张 SAN 证书里的域名可以分属不同云账号
+- DNS provider：阿里云、Cloudflare（均支持 zone 自动扫描）
 - 到期前 30 天自动续期，续期时间按配置名哈希打散，避免同一分钟集中冲击 CA
 - **持久化状态机**：进程重启后从断点续跑，而不是重新向 CA 申请一张
 
@@ -47,6 +48,8 @@ CertPilot 针对这些做了具体设计：流水线的终点是 `已生效`（�
 **部署与验证**
 - 阿里云 CDN（经 CAS 两段式：一次上传，多域名绑定，可回滚到上一个 CertId）
 - **自建 Nginx（经 SSH）**：自动识别宿主机 systemd / 宿主机直管 / Docker 三种形态
+- **Kubernetes Secret**：直接调 API Server，用指纹注解确认写入的确实是这一版
+- **通用 Webhook**：没有内置支持的场景都有出路，支持 HMAC 签名与「不发送私钥」
 - 部署后带重试窗口拨测，指纹一致才算完成
 - 单个目标失败不影响其余目标
 
@@ -55,6 +58,20 @@ CertPilot 针对这些做了具体设计：流水线的终点是 `已生效`（�
 - `nginx -T` 反向发现配置里已有的证书与域名，接入时不必手工录入
 - 「试运行」只跑预检命令，不碰任何证书文件——配置错误在这里就暴露
 - 写入权限与重载权限**分别探测**：能写证书目录不代表能向 root 启动的 master 进程发信号
+
+**巡检与告警**
+- 每天拨测所有域名：到期、证书链完整性、域名匹配、协议版本，
+  并与本地最新一版**比对指纹**——「续了但没生效」只有这一项能发现
+- 支持「仅监控不管理」的域名：证书是别人签的，但到期前仍要有人知道
+- 钉钉 / 企业微信 / 飞书 / 通用 Webhook；**发现汇总成一条消息**，不刷屏
+- Prometheus 指标，可接入已有告警体系
+
+**运维能力**
+- **证书回滚**：新证书出问题时退回上一个已知可用的版本，不必等重新签发
+- **AK 轮换**：建新 → 验证 → 换用 → 删旧，全程不中断
+- **CA 配额自保护**：接近上限时主动停下并告警——撞上 CA 的墙会被锁一整周
+- **只读分享看板**：给不需要登录后台的人看状态，不暴露任何运维细节
+- **CLI**：`certpilot cli status` 有严重问题时退出码为 1，可直接用于流水线卡点
 
 **使用体验**
 - 一条 `docker compose up` 起步，三个容器
@@ -150,6 +167,8 @@ pending → preflight → ordering → challenging → validating
 | `CP_RUN_WORKER` | `serve` 是否同进程跑调度，默认 `true` |
 | `CP_SCAN_INTERVAL` | 到期扫描周期，默认 `1h` |
 
+巡检默认每天 04:00 跑一次，保留 90 天记录；任务日志保留 180 天。
+
 ## 安全
 
 这个系统集中持有全站证书私钥与多个云账号密钥，本身就是最高价值的攻击目标。
@@ -207,6 +226,9 @@ server/                      Go 后端
     pipeline/                签发流水线状态机
     sshx/                    SSH 连接、shell 转义、命令执行
     nginxsvc/                nginx 形态探测、挂载映射反查、证书下发
+    health/                  TLS 拨测与证书判读
+    notify/                  通知渠道与告警合并
+    cli/                     命令行客户端
     provider/dns|deploy/     DNS 与部署适配器（注册表模式）
     scheduler/               到期扫描与任务执行
     store/                   数据访问与迁移
@@ -217,16 +239,29 @@ web/                         React + shadcn/ui + Vite
 新增一家云只需实现 `Deployer` 接口的三个方法：`Validate` / `Deploy` / `Verify`。
 编排层里没有任何 `if aliyun` 的分支。
 
+## CLI
+
+走和界面完全相同的 HTTP 接口，因此权限校验与审计日志对它同样生效。
+
+```bash
+export CP_URL=http://localhost:8088 CP_PASSWORD=…
+
+certpilot cli list      # 列出全部证书及剩余天数
+certpilot cli status    # 巡检摘要；有严重问题时退出码为 1
+certpilot cli issue 3   # 触发一次签发或续期
+certpilot cli scan      # 触发一轮巡检
+```
+
+`status` 的退出码可以直接当流水线卡点用。
+
 ## 路线图
 
-已完成的是 M1。后续：
+M1–M4 已完成：签发续期、SSH 与 nginx 部署、巡检告警、回滚与轮换。
 
-- **M3** 每日巡检（证书链完整性、指纹一致性、吊销状态）、腾讯云 / Cloudflare DNS、
-  SLB / OSS / K8s / Webhook 部署、多 CA 故障转移、通知渠道
-- **M4** RBAC 细化、可分享的只读健康看板、Prometheus 指标、OpenAPI 与 CLI、AK 轮换
+后续可做：腾讯云 / 华为云 DNS、SLB / OSS 部署、多 CA 故障转移、
+CNAME 委派向导、更细的 RBAC。
 
-M2（SSH 主机管理、nginx 形态探测、三种写入策略、证书反向发现）已完成，
-带一套针对真实 SSH 目标机的集成测试，见 [test/README.md](test/README.md)。
+针对真实 SSH 目标机的集成测试见 [test/README.md](test/README.md)。
 
 ## License
 

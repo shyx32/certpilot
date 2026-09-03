@@ -202,3 +202,26 @@ func (s *Store) ZonesOf(ctx context.Context, credentialID int64) ([]string, erro
 	}
 	return out, rows.Err()
 }
+
+// ReplaceSecret 用新的明文替换凭据内容，用于 AccessKey 轮换。
+//
+// AAD 仍绑定同一条记录 ID，因此密文不会被搬到别处复用。
+func (s *Store) ReplaceSecret(ctx context.Context, id int64, secret []byte) error {
+	sealed, err := s.box.Seal(secret, credentialAAD(id))
+	if err != nil {
+		return err
+	}
+	blob, err := json.Marshal(sealed)
+	if err != nil {
+		return err
+	}
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE credential SET secret_enc=$2 WHERE id=$1 AND deleted_at IS NULL`, id, blob)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
